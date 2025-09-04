@@ -19,6 +19,11 @@ jobs:
   docker:
     name: Docker build & push to ECR
     runs-on: ubuntu-latest
+    outputs:
+      amd64_digest: ${{ steps.arch-digests.outputs.amd64_digest }}
+      arm64_digest: ${{ steps.arch-digests.outputs.arm64_digest }}
+      amd64_tag: ${{ steps.arch-digests.outputs.amd64_tag }}
+      arm64_tag: ${{ steps.arch-digests.outputs.arm64_tag }}
     permissions:
       id-token: write         # for OIDC to assume AWS role
       contents: read
@@ -70,6 +75,105 @@ jobs:
           provenance: false
           build-args: |
             GIT_TAG=${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
+
+      - name: Create per-architecture tags & capture digests
+        id: arch-digests
+        env:
+          REPO: ${{ env.ECR_REPOSITORY }}
+          REGION: ${{ env.AWS_REGION }}
+        run: |
+          set -euo pipefail
+          echo "Original tags from metadata action:" >&2
+          echo "${{ steps.meta.outputs.tags }}" >&2
+
+          # Determine a base tag preference: latest > first semantic version > first tag line
+            # Metadata action output lines look like: registry/repo:tag
+          BASE_TAG=""
+          while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            tag_part=${line##*:}
+            if [[ "$tag_part" == "latest" ]]; then
+              BASE_TAG=latest
+              break
+            fi
+          done < <(echo "${{ steps.meta.outputs.tags }}")
+
+          if [[ -z "$BASE_TAG" ]]; then
+            # try semver pattern v1.2.3
+            while IFS= read -r line; do
+              [[ -z "$line" ]] && continue
+              tag_part=${line##*:}
+              if [[ "$tag_part" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                BASE_TAG=$tag_part
+                break
+              fi
+            done < <(echo "${{ steps.meta.outputs.tags }}")
+          fi
+
+          if [[ -z "$BASE_TAG" ]]; then
+            # fallback: first non-empty line's tag
+            BASE_TAG=$(echo "${{ steps.meta.outputs.tags }}" | awk -F: 'NF>1 {print $NF; exit}')
+          fi
+
+          if [[ -z "$BASE_TAG" ]]; then
+            echo "No base tag resolved; skipping arch tagging." >&2
+            exit 0
+          fi
+
+          echo "Using base tag: $BASE_TAG" >&2
+
+          # Fetch manifest list JSON for selected tag
+          MANIFEST_LIST=$(aws ecr batch-get-image \
+            --repository-name "$REPO" \
+            --image-ids imageTag="$BASE_TAG" \
+            --accepted-media-types application/vnd.docker.distribution.manifest.list.v2+json \
+            --query 'images[0].imageManifest' \
+            --output text || true)
+
+          if [[ -z "$MANIFEST_LIST" || "$MANIFEST_LIST" == "None" ]]; then
+            echo "Manifest list not found for $BASE_TAG; not a multi-arch image?" >&2
+            exit 0
+          fi
+
+          # Extract per-arch digests
+          AMD64_DIGEST=$(echo "$MANIFEST_LIST" | jq -r 'fromjson.manifests[] | select(.platform.os=="linux" and .platform.architecture=="amd64") | .digest' || true)
+          ARM64_DIGEST=$(echo "$MANIFEST_LIST" | jq -r 'fromjson.manifests[] | select(.platform.os=="linux" and .platform.architecture=="arm64") | .digest' || true)
+
+          echo "linux/amd64=$AMD64_DIGEST" >&2
+            echo "linux/arm64=$ARM64_DIGEST" >&2
+
+          create_single_arch_tag() {
+            local arch=$1 digest=$2
+            local tag="${BASE_TAG}-${arch}"
+            [[ -z "$digest" || "$digest" == "null" ]] && return 0
+            echo "Tagging $tag -> $digest" >&2
+            aws ecr batch-get-image \
+              --repository-name "$REPO" \
+              --image-ids imageDigest="$digest" \
+              --accepted-media-types application/vnd.docker.distribution.manifest.v2+json \
+              --query 'images[0].imageManifest' -o text > single-${arch}.json
+            aws ecr put-image \
+              --repository-name "$REPO" \
+              --image-tag "$tag" \
+              --image-manifest file://single-${arch}.json > /dev/null
+          }
+
+          create_single_arch_tag amd64 "$AMD64_DIGEST"
+          create_single_arch_tag arm64 "$ARM64_DIGEST"
+
+          # Expose outputs
+          {
+            echo "amd64_digest=$AMD64_DIGEST"
+            echo "arm64_digest=$ARM64_DIGEST"
+            [[ -n "$AMD64_DIGEST" && "$AMD64_DIGEST" != "null" ]] && echo "amd64_tag=${BASE_TAG}-amd64"
+            [[ -n "$ARM64_DIGEST" && "$ARM64_DIGEST" != "null" ]] && echo "arm64_tag=${BASE_TAG}-arm64"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Output per-arch tagging results
+        if: ${{ steps.arch-digests.outputs.amd64_digest != '' || steps.arch-digests.outputs.arm64_digest != '' }}
+        run: |
+          echo "AMD64 digest: ${{ steps.arch-digests.outputs.amd64_digest }} (tag: ${{ steps.arch-digests.outputs.amd64_tag }})"
+          echo "ARM64 digest: ${{ steps.arch-digests.outputs.arm64_digest }} (tag: ${{ steps.arch-digests.outputs.arm64_tag }})"
 
       - name: Output pushed image references
         run: |
