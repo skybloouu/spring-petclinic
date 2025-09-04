@@ -134,13 +134,20 @@ jobs:
             echo "Manifest list not found for $BASE_TAG; not a multi-arch image?" >&2
             exit 0
           fi
+          # Normalize: AWS sometimes returns a JSON string, sometimes already parsed text (CLI behavior differences).
+          # Try parsing as string containing JSON; if that fails, treat as JSON object.
+          NORMALIZED=$(echo "$MANIFEST_LIST" | jq -r 'try (fromjson) catch .')
+          # Sanity check manifests array exists
+          if ! echo "$NORMALIZED" | jq -e '.manifests | length > 0' >/dev/null 2>&1; then
+            echo "Could not parse manifest list structure; skipping arch tagging." >&2
+            exit 0
+          fi
 
-          # Extract per-arch digests
-          AMD64_DIGEST=$(echo "$MANIFEST_LIST" | jq -r 'fromjson.manifests[] | select(.platform.os=="linux" and .platform.architecture=="amd64") | .digest' || true)
-          ARM64_DIGEST=$(echo "$MANIFEST_LIST" | jq -r 'fromjson.manifests[] | select(.platform.os=="linux" and .platform.architecture=="arm64") | .digest' || true)
+          AMD64_DIGEST=$(echo "$NORMALIZED" | jq -r '.manifests[] | select(.platform.os=="linux" and .platform.architecture=="amd64") | .digest' || true)
+          ARM64_DIGEST=$(echo "$NORMALIZED" | jq -r '.manifests[] | select(.platform.os=="linux" and .platform.architecture=="arm64") | .digest' || true)
 
           echo "linux/amd64=$AMD64_DIGEST" >&2
-            echo "linux/arm64=$ARM64_DIGEST" >&2
+          echo "linux/arm64=$ARM64_DIGEST" >&2
 
           create_single_arch_tag() {
             local arch=$1 digest=$2
