@@ -164,6 +164,13 @@
       <artifactId>spring-cloud-aws-starter-s3</artifactId>
     </dependency>
 
+    <!-- AWS Secrets Manager for database credentials management -->
+    <dependency>
+      <groupId>io.awspring.cloud</groupId>
+      <artifactId>spring-cloud-aws-starter-secretsmanager</artifactId>
+      <!-- Version managed by spring-cloud-aws-dependencies BOM -->
+    </dependency>
+
     <dependency>
       <groupId>software.amazon.awssdk</groupId>
       <artifactId>kms</artifactId>
