@@ -17,14 +17,13 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * Perform some initializing of the supported pet types on startup by
- * downloading them
+ * Perform some initializing of the supported pet types on startup by downloading them
  * from S3, if enabled
  */
 @Component
 public class InitPetTypes implements InitializingBean {
 
-	private final Logger logger = LoggerFactory.getLogger(InitPetTypes.class);
+	private static final Logger logger = LoggerFactory.getLogger(InitPetTypes.class);
 
 	private final PetTypesRepository petTypesRepository;
 
@@ -53,16 +52,17 @@ public class InitPetTypes implements InitializingBean {
 		KmsClient kms = null;
 		if (credentialsProvider != null) {
 			try {
-				// Derive region from env (AWS_REGION / AWS_DEFAULT_REGION) or fall back
-				// to ap-south-1
+				// Derive region from env (AWS_REGION / AWS_DEFAULT_REGION) or fallback to
+				// a default.
 				String regionEnv = System.getenv("AWS_REGION");
 				if (regionEnv == null || regionEnv.isBlank()) {
 					regionEnv = System.getenv("AWS_DEFAULT_REGION");
 				}
 				Region region = Region.of(regionEnv != null && !regionEnv.isBlank() ? regionEnv : "ap-south-1");
 				kms = KmsClient.builder().credentialsProvider(credentialsProvider).region(region).build();
-			} catch (Exception e) {
-				logger.warn("Disabling KMS integration (failed to create client): {}", e.getMessage());
+			}
+			catch (Exception ex) {
+				logger.warn("Disabling KMS integration (failed to create client): {}", ex.getMessage());
 			}
 		}
 		this.kmsClient = kms; // may be null if not configured
@@ -79,9 +79,10 @@ public class InitPetTypes implements InitializingBean {
 		String fileContents;
 		try {
 			fileContents = s3Client.getObjectAsBytes(b -> b.bucket(petTypesBucket).key(petTypesInitObjectKey))
-					.asUtf8String();
-		} catch (Exception e) {
-			logger.warn("Failed retrieving pet types from S3 (skipping initialization): {}", e.getMessage());
+				.asUtf8String();
+		}
+		catch (Exception ex) {
+			logger.warn("Failed retrieving pet types from S3 (skipping initialization): {}", ex.getMessage());
 			return; // do not fail app startup
 		}
 
@@ -89,15 +90,17 @@ public class InitPetTypes implements InitializingBean {
 		if (petTypesInitObjectKmsEncrypted) {
 			if (kmsClient == null) {
 				logger.warn("KMS decryption requested but no KmsClient available; skipping decryption");
-			} else {
+			}
+			else {
 				try {
 					logger.info("Decrypting pet types using KMS key alias '{}'", petTypesKmsKeyAlias);
 					SdkBytes encryptedData = SdkBytes.fromUtf8String(fileContents);
 					DecryptResponse decryptResponse = kmsClient
-							.decrypt(b -> b.ciphertextBlob(encryptedData).keyId(petTypesKmsKeyAlias));
+						.decrypt(b -> b.ciphertextBlob(encryptedData).keyId(petTypesKmsKeyAlias));
 					fileContents = decryptResponse.plaintext().asUtf8String();
-				} catch (Exception e) {
-					logger.warn("Failed KMS decrypt (continuing with original contents): {}", e.getMessage());
+				}
+				catch (Exception ex) {
+					logger.warn("Failed KMS decrypt (continuing with original contents): {}", ex.getMessage());
 				}
 			}
 		}
@@ -117,11 +120,13 @@ public class InitPetTypes implements InitializingBean {
 				try {
 					logger.info("Deleting Pet types file from S3 bucket '{}'", petTypesBucket);
 					s3Client.deleteObject(builder -> builder.bucket(petTypesBucket).key(petTypesInitObjectKey));
-				} catch (Exception e) {
-					logger.warn("Failed deleting pet types init object: {}", e.getMessage());
 				}
-			} catch (Exception e) {
-				logger.warn("Failed persisting pet types to repository: {}", e.getMessage());
+				catch (Exception ex) {
+					logger.warn("Failed deleting pet types init object: {}", ex.getMessage());
+				}
+			}
+			catch (Exception ex) {
+				logger.warn("Failed persisting pet types to repository: {}", ex.getMessage());
 			}
 		}
 	}

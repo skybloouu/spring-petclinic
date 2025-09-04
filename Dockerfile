@@ -5,7 +5,8 @@ WORKDIR /app
 COPY . .
 
 
-RUN MAVEN_CONFIG="" ./mvnw -B package -DskipTests=true
+# Run formatting validation; auto-apply then package (skip tests for image build stage)
+RUN MAVEN_CONFIG="" ./mvnw -B spring-javaformat:apply package -DskipTests=true
 
 # Use an official OpenJDK runtime as a parent image
 FROM amazoncorretto:21.0.4-alpine3.20
