@@ -11,12 +11,14 @@ import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.kms.KmsClient;
 import software.amazon.awssdk.services.kms.model.DecryptResponse;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.regions.Region;
 
 import java.util.List;
 import java.util.Optional;
 
 /**
- * Perform some initializing of the supported pet types on startup by downloading them
+ * Perform some initializing of the supported pet types on startup by
+ * downloading them
  * from S3, if enabled
  */
 @Component
@@ -30,11 +32,17 @@ public class InitPetTypes implements InitializingBean {
 
 	private final S3Client s3Client;
 
+	@Value("${app.init.pet-types.bucket:spring-petclinic-init-demo1}")
+	private String petTypesBucket;
+
 	@Value("${app.init.pet-types.key:petclinic-pettypes.txt}")
 	private String petTypesInitObjectKey;
 
 	@Value("${app.init.pet-types.kms-encrypted:false}")
 	private Boolean petTypesInitObjectKmsEncrypted;
+
+	@Value("${app.init.pet-types.kms-key-alias:alias/spring-petclinic-init-demo1}")
+	private String petTypesKmsKeyAlias;
 
 	InitPetTypes(PetTypesRepository petTypesRepository, Optional<AwsCredentialsProvider> awsCredentialsProvider,
 			Optional<S3Client> s3Client) {
@@ -42,8 +50,22 @@ public class InitPetTypes implements InitializingBean {
 		this.s3Client = s3Client.orElse(null);
 
 		AwsCredentialsProvider credentialsProvider = awsCredentialsProvider.orElse(null);
-		this.kmsClient = credentialsProvider != null
-				? KmsClient.builder().credentialsProvider(credentialsProvider).build() : null;
+		KmsClient kms = null;
+		if (credentialsProvider != null) {
+			try {
+				// Derive region from env (AWS_REGION / AWS_DEFAULT_REGION) or fall back
+				// to ap-south-1
+				String regionEnv = System.getenv("AWS_REGION");
+				if (regionEnv == null || regionEnv.isBlank()) {
+					regionEnv = System.getenv("AWS_DEFAULT_REGION");
+				}
+				Region region = Region.of(regionEnv != null && !regionEnv.isBlank() ? regionEnv : "ap-south-1");
+				kms = KmsClient.builder().credentialsProvider(credentialsProvider).region(region).build();
+			} catch (Exception e) {
+				logger.warn("Disabling KMS integration (failed to create client): {}", e.getMessage());
+			}
+		}
+		this.kmsClient = kms; // may be null if not configured
 	}
 
 	@Override
@@ -53,18 +75,31 @@ public class InitPetTypes implements InitializingBean {
 			return;
 		}
 
-		logger.info("Loading Pet types from \"spring-petclinic-init\" bucket at " + petTypesInitObjectKey);
-		String fileContents = s3Client
-			.getObjectAsBytes(b -> b.bucket("spring-petclinic-init").key(petTypesInitObjectKey))
-			.asUtf8String();
+		logger.info("Loading Pet types from bucket '{}' key '{}'", petTypesBucket, petTypesInitObjectKey);
+		String fileContents;
+		try {
+			fileContents = s3Client.getObjectAsBytes(b -> b.bucket(petTypesBucket).key(petTypesInitObjectKey))
+					.asUtf8String();
+		} catch (Exception e) {
+			logger.warn("Failed retrieving pet types from S3 (skipping initialization): {}", e.getMessage());
+			return; // do not fail app startup
+		}
 
 		// if kms encrypted, attempt to decrypt it
 		if (petTypesInitObjectKmsEncrypted) {
-			logger.info("Decrypting pet types using KMS key...");
-			SdkBytes encryptedData = SdkBytes.fromUtf8String(fileContents);
-			DecryptResponse decryptResponse = kmsClient
-				.decrypt(b -> b.ciphertextBlob(encryptedData).keyId("spring-petclinic-init"));
-			fileContents = decryptResponse.plaintext().asUtf8String();
+			if (kmsClient == null) {
+				logger.warn("KMS decryption requested but no KmsClient available; skipping decryption");
+			} else {
+				try {
+					logger.info("Decrypting pet types using KMS key alias '{}'", petTypesKmsKeyAlias);
+					SdkBytes encryptedData = SdkBytes.fromUtf8String(fileContents);
+					DecryptResponse decryptResponse = kmsClient
+							.decrypt(b -> b.ciphertextBlob(encryptedData).keyId(petTypesKmsKeyAlias));
+					fileContents = decryptResponse.plaintext().asUtf8String();
+				} catch (Exception e) {
+					logger.warn("Failed KMS decrypt (continuing with original contents): {}", e.getMessage());
+				}
+			}
 		}
 
 		List<PetType> foundTypes = fileContents.lines().map(s -> {
@@ -76,11 +111,18 @@ public class InitPetTypes implements InitializingBean {
 
 		// load the found types into the database
 		if (!foundTypes.isEmpty()) {
-			petTypesRepository.saveAllAndFlush(foundTypes);
-
-			// clean up the file if we've successfully loaded from it
-			logger.info("Deleting Pet types file from S3");
-			s3Client.deleteObject(builder -> builder.bucket("spring-petclinic-init").key(petTypesInitObjectKey));
+			try {
+				petTypesRepository.saveAllAndFlush(foundTypes);
+				logger.info("Saved {} pet types", foundTypes.size());
+				try {
+					logger.info("Deleting Pet types file from S3 bucket '{}'", petTypesBucket);
+					s3Client.deleteObject(builder -> builder.bucket(petTypesBucket).key(petTypesInitObjectKey));
+				} catch (Exception e) {
+					logger.warn("Failed deleting pet types init object: {}", e.getMessage());
+				}
+			} catch (Exception e) {
+				logger.warn("Failed persisting pet types to repository: {}", e.getMessage());
+			}
 		}
 	}
 
